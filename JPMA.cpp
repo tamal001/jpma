@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
 #include <random>
+#include <string.h>
 
 #include "defines.hpp"
 #include "JPMA.hpp"
@@ -13,7 +14,7 @@ PMA::PMA(){
     totalSegments = 1;                                       //One segment created at the start
     lastElementPos.push_back(0);                             //Position of last element in the segment
     lastValidPos = (SEGMENT_SIZE/sizeof(type_t)) - 1;
-    cout << "Last valid position: "<<lastValidPos << endl;
+    //cout << "Last valid position: "<<lastValidPos << endl;
 
     //Create space for first segment
     type_t *starting_key_chunk, *starting_value_chunk;
@@ -55,7 +56,7 @@ void PMA::preCalculateJacobson(){
         }
     }
 }
-bool PMA::insert(type_t key, type_t value){
+bool PMA::insert(type_t key, type_t value, int insertCount){
     //Find the location using Binary Search.
     int targetSegment;
     for(targetSegment = 0; targetSegment < totalSegments; targetSegment++){
@@ -63,6 +64,17 @@ bool PMA::insert(type_t key, type_t value){
     }
     targetSegment--;
 
+/*
+    if(insertCount >=3) {
+        printSegElements(targetSegment);
+        type_t elementCount = 0;
+        for(int i = 0; i<totalSegments; i++){
+            elementCount += cardinality[i];
+        }
+        cout<<"key to insert "<<key<<", Total elements: "<<elementCount<< endl;
+        exit(0);
+    }
+*/
     type_t position = findLocation(key, targetSegment);
     //cout <<" Found position: " << position<< endl;
     type_t * segmentOffset = key_chunks[targetSegment];
@@ -73,18 +85,60 @@ bool PMA::insert(type_t key, type_t value){
     int probCount;
     if (position >= lastElementPos[targetSegment]){ //Got the last inserted postion of the current segment
         if(position >= lastValidPos ){ //Got out of the current segment. Traverse backward for vacant space
-            probCount = 1;
-            type_t *insertPos = segmentOffset + position - probCount;
+            
+            type_t blockNo = lastValidPos/JacobsonIndexSize;
+            u_char * ar = NonZeroEntries[bitmap[targetSegment][blockNo]];
+            type_t * segmentKeyOffset = key_chunks[targetSegment];
+            type_t * segmentValOffset = value_chunks[targetSegment];
+            type_t position = blockNo * JacobsonIndexSize;
+            
+            probCount = 0;
+            //int elementInBlock = ar[0];
+            while(probCount < MaxThreshold){
+                if(ar[0] == 0){//Got a complete emply block. select the last cell
+                    position += JacobsonIndexSize - 1;
+                    break;
+                }
+                else if(ar[0] == JacobsonIndexSize){
+                    probCount += JacobsonIndexSize;
+                    blockNo--;
+                    ar = NonZeroEntries[bitmap[targetSegment][blockNo]];
+                    position = blockNo * JacobsonIndexSize;
+                }else{
+                    if(ar[ar[0]] < JacobsonIndexSize - 1){
+                        position += JacobsonIndexSize - 1;
+                        probCount++;
+                    }
+                    else{
+                        for(int j = ar[0]; j > 1; j--){
+                            if(ar[j]-ar[j-1] > 1) {
+                                position += ar[j] - 1;
+                                probCount += JacobsonIndexSize - ar[j] + 1;
+                                break;
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+            if(probCount >= MaxThreshold){
+                redistribute(targetSegment, REDESIGN);
+                return insert(key, value, ++insertCount);
+            }
+            //type_t *insertPos = segmentOffset + position - probCount;
+            /*
             while(*insertPos != 0){
                 insertPos--;
                 probCount++;
                 if(probCount > ProbLimit){
-                    redistribute(targetSegment);
-                    return insert(key, value);
+                    redistribute(targetSegment, REDESIGN);
+                    return insert(key, value, ++insertCount);
                 }
             }
-            insertInPosition(position-probCount, targetSegment, key, value);
-
+            */
+            insertInPosition(position, targetSegment, key, value);
+            
+            type_t * insertPos = segmentKeyOffset+position;
             while(*insertPos > *(insertPos+1)){
                 swapElements(targetSegment, position-probCount, 1);
                 probCount--;
@@ -114,20 +168,40 @@ bool PMA::insert(type_t key, type_t value){
         probCount++;
         insertPos++;
         if(probCount > ProbLimit) {
-            redistribute(targetSegment);
-            return insert(key, value);
+            redistribute(targetSegment, REDESIGN);
+            return insert(key, value, ++insertCount);
+        }else if(position+probCount > lastValidPos) break;
+    }
+    if(position + probCount > lastValidPos){
+        //traverse backwared
+        probCount = 1;
+        insertPos =segmentOffset + position - probCount;
+        while(*insertPos != 0){
+            insertPos--;
+            probCount++;
+            if(probCount > ProbLimit){
+                redistribute(targetSegment, REDESIGN);
+                return insert(key, value, ++insertCount);
+            }
         }
+        insertInPosition(position-probCount, targetSegment, key, value);
+        while(*insertPos > *(insertPos+1)){
+            swapElements(targetSegment, position-probCount, 1);
+            probCount--;
+            if(probCount == 0) break;
+            insertPos++;
+        }
+        return true;
+    }else{
+        insertInPosition(position+probCount, targetSegment, key, value);
+        while(*insertPos < *(insertPos-1)){
+            probCount--;
+            swapElements(targetSegment, position+probCount, 1);
+            if(probCount == 0) break;
+            insertPos--;
+        }
+        return true;
     }
-    insertInPosition(position+probCount, targetSegment, key, value);
-    while(*insertPos < *(insertPos-1)){
-        probCount--;
-        swapElements(targetSegment, position+probCount, 1);
-        if(probCount == 0) break;
-        insertPos--;
-    }
-    //Adjust position not to be adjacent. Keep some space
-
-    return true;
 }
 
 void PMA::swapElements(type_t targetSegment, type_t position, type_t adjust){
@@ -154,7 +228,7 @@ bool PMA::insertInPosition(type_t position, int targetSegment, type_t key, type_
     bitmap[targetSegment][blockPosition] |= mask;
     cardinality[targetSegment]++;
     if(lastElementPos[targetSegment] < position) lastElementPos[targetSegment] = position;
-    if(cardinality[targetSegment] > MaxThreshold) redistribute(targetSegment);
+    //if(cardinality[targetSegment] > MaxThreshold) redistribute(targetSegment, INSERT);
     return true;
 }
 
@@ -190,21 +264,22 @@ bool PMA::deleteInPosition(type_t position, int targetSegment, type_t key){
         }
         lastElementPos[targetSegment] = position;
     }
-    if(cardinality[targetSegment] > MinThreshold) redistribute(targetSegment);
+    if(cardinality[targetSegment] < MinThreshold) redistribute(targetSegment, DELETE);
     return true;
 }
 
-void PMA::redistribute(int targetSegment){
-    cout << "CALLED FOR REDISTRIBUTION. Cardinality "<<cardinality[targetSegment] <<endl;
-    if(cardinality[targetSegment] < MinThreshold){ //Try to delete this segment
+void PMA::redistribute(int targetSegment, redistribution type){
+    //cout << "Cardinality "<<cardinality[targetSegment] <<" last position: "<<lastElementPos[targetSegment] <<" Total Seg: "<<totalSegments<<" current Seg "<<targetSegment<< " last valid: "<<lastValidPos<<" distribution type: "<<type<<endl;
+    if(type == DELETE){ //Try to delete this segment
         if(targetSegment > 0 && cardinality[targetSegment] + cardinality[targetSegment-1] < MaxThreshold){
             redistributeWithPrev(targetSegment);
         }else if(targetSegment<totalSegments-1 && cardinality[targetSegment] + cardinality[targetSegment+1] < MaxThreshold){
             redistributeWithNext(targetSegment);
         }
-    }else if(cardinality[targetSegment] > MaxThreshold){ //Try to add new segment
+    }else if(type == INSERT){ //Try to add new segment
         redistributeWithDividing(targetSegment);
     }else{ //Redistribute the contents of this Segment
+        if (cardinality[targetSegment] > MaxThreshold) return redistribute(targetSegment, INSERT);
         type_t ar[lastValidPos+1], br[lastValidPos+1];
         int elementCount = 0;
         type_t * moveKeyOffset = key_chunks[targetSegment];
@@ -219,14 +294,18 @@ void PMA::redistribute(int targetSegment){
                 elementCount++;
             }
         }
-        cout << "copied "<<elementCount<<" elements." <<endl;
+        //if(elementCount != cardinality[targetSegment]) cout<<"SHOUT OUT LOUD"<<"\n"<<endl;
+        //cout << "copied "<<elementCount<<" elements." <<endl;
         for(int i = 0; i < BLOCKS_IN_SEGMENT; i++){     //Clear existing bitmap
             bitmap[targetSegment][i] = 0;
         }
-        cout <<"cleared bitmap blocks"<<endl;
-        default_random_engine generator;
-        uniform_real_distribution<double> distribution(0.0,1.0);
-        double density = cardinality[targetSegment] / (lastValidPos + 1.0);
+        //cout <<"cleared bitmap blocks"<<endl;
+        //default_random_engine generator;
+        //uniform_real_distribution<double> distribution(0.0,1.0);
+        double perElementDensity = 1/(lastValidPos + 1.0);
+        double d = 0;
+        double gapDensity = (lastValidPos + 1.0)/cardinality[targetSegment];
+        //cout<<"Gap density "<<gapDensity<<", Per element density: "<<perElementDensity << ", Elements: "<<elementCount<<", cardinality: "<<cardinality[targetSegment]<< endl;
         type_t i, j=0, gap = 0;
         for(i = 0; i <= lastValidPos; i++){
             if(elementCount == lastValidPos - i){
@@ -243,20 +322,22 @@ void PMA::redistribute(int targetSegment){
                     break;
                 }
             }else{
-                double d = distribution(generator);
-                if(d < density || gap == MaxGap){
+                if(d <= 1.0 || gap == MaxGap){
                     *(moveKeyOffset + i) = ar[j];
                     *(moveValOffset + i) = br[j];
                     int blockPosition = i / JacobsonIndexSize;
                     int bitPosition = i % JacobsonIndexSize;
                     u_short mask =  1 << bitPosition;
                     bitmap[targetSegment][blockPosition] |= mask;
-                    j++; elementCount--; gap = 0;
+                    j++; elementCount--; gap = 0; d += (gapDensity-1);
                     if(elementCount == 0){
                         lastElementPos[targetSegment] = i;
                         break;
                     }
-                }else gap++;
+                }else{
+                    d -= 1.0;
+                    gap++;
+                }
             }
         }
         for(i = 0; i <= lastValidPos; i++){
@@ -266,6 +347,7 @@ void PMA::redistribute(int targetSegment){
             }
         }
     }
+    //printAllElements();
 }
 
 void PMA::redistributeWithPrev(int targetSegment){
@@ -276,13 +358,10 @@ void PMA::redistributeWithPrev(int targetSegment){
         type_t * destValOffset = value_chunks[targetSegment-1];
         type_t * moveKeyOffset = key_chunks[targetSegment];
         type_t * moveValOffset = value_chunks[targetSegment];
-        type_t key, value;
         for(type_t i = lastElementPos[targetSegment-1]+1; j <= lastElementPos[targetSegment]; i++,j++){
-            key = *(moveKeyOffset + j);
-            value = *(moveValOffset + j);
-            if(key != 0){
-                *(destKeyOffset + i) = key;
-                *(destValOffset + i) = value;
+            if(*(moveKeyOffset + j) != 0){
+                *(destKeyOffset + i) = *(moveKeyOffset + j);
+                *(destValOffset + i) = *(moveValOffset + j);
                 int blockPosition = i / JacobsonIndexSize;
                 int bitPosition = i % JacobsonIndexSize;
                 u_short mask =  1 << bitPosition;
@@ -360,11 +439,11 @@ void PMA::redistributeWithPrev(int targetSegment){
         
         //clear previous bitmap
         vector<u_short> blocks;
-        for(i = 0; i < BLOCKS_IN_SEGMENT; i++){
+        for(int ii = 0; ii < BLOCKS_IN_SEGMENT; ii++){
             blocks.push_back(0);
         }
-        
-        for(i = 0; i <= lastValidPos && j <= lastElementPos[targetSegment-1]; i++){
+        int lastpos = lastElementPos[targetSegment-1];
+        for(i = 0; i <= lastValidPos && j <= lastpos; i++){
             if(elements == lastValidPos - i){
                 while(*(moveKeyOffset + j) == 0 ){
                     j++;
@@ -391,17 +470,19 @@ void PMA::redistributeWithPrev(int targetSegment){
                     elements--;
                 }
             }
-            if(whichSegment && j == lastElementPos[targetSegment-1]){
+            if(whichSegment && j == lastpos){
                 whichSegment = false;
                 moveKeyOffset = key_chunks[targetSegment];
                 moveValOffset = value_chunks[targetSegment];
                 j = 0;
+                lastpos = lastElementPos[targetSegment];
             }
         }
         smallest.erase(smallest.begin() + targetSegment); //Keep smallest element at targetsegment -1
         cardinality[targetSegment - 1] += cardinality [targetSegment];
         totalSegments--;
-        lastElementPos[targetSegment - 1] = i;
+        if(j == lastpos) lastElementPos[targetSegment - 1] = i-1;
+        else lastElementPos[targetSegment - 1] = i;
 
         //Remove previous key and value chunks. Insert the new one.
         delete[] key_chunks[targetSegment - 1], key_chunks[targetSegment];
@@ -427,6 +508,8 @@ void PMA::redistributeWithDividing(int targetSegment){
     type_t *new_key_chunk, *new_value_chunk;
     new_key_chunk = (type_t *) malloc (SEGMENT_SIZE);
     new_value_chunk = (type_t *) malloc (SEGMENT_SIZE);
+    memset(new_key_chunk,0,SEGMENT_SIZE);
+    memset(new_value_chunk,0,SEGMENT_SIZE);
 
     type_t * moveKeyOffset = key_chunks[targetSegment];
     type_t * moveValOffset = value_chunks[targetSegment];
@@ -441,7 +524,7 @@ void PMA::redistributeWithDividing(int targetSegment){
     lastElementPos[targetSegment] = i;
 
     vector<u_short> blocks;
-    for(i = 0; i < BLOCKS_IN_SEGMENT; i++){
+    for(int ii = 0; ii < BLOCKS_IN_SEGMENT; ii++){
         blocks.push_back(0);
     }
     //Copy the elements to the new segment and erase from previous segment
@@ -457,8 +540,8 @@ void PMA::redistributeWithDividing(int targetSegment){
             bitmap[targetSegment][blockPosition] &= (~mask);
 
             blockPosition = j / JacobsonIndexSize;
-            bitPosition = i % JacobsonIndexSize;
-            mask = i << bitPosition;
+            bitPosition = j % JacobsonIndexSize;
+            mask = 1 << bitPosition;
             blocks[blockPosition] |= mask;
         }
     }
@@ -469,7 +552,7 @@ void PMA::redistributeWithDividing(int targetSegment){
     cardinality[targetSegment] = halfElement;
     bitmap.emplace(bitmap.begin() + targetSegment + 1, blocks);
     totalSegments++;
-    for(i = 0; i < cardinality[targetSegment + 1]; i++){
+    for(i = 0; i <= lastElementPos[targetSegment + 1]; i++){
         if(*(destKeyOffset + i) != 0){
             smallest.emplace(smallest.begin() + targetSegment + 1, *(destKeyOffset + i));
             break;
@@ -505,7 +588,7 @@ type_t PMA::range_sum(type_t startKey, type_t endKey){
     type_t pbase = blockNo * JacobsonIndexSize;
 
     bool flag = false;
-    cout << "start Position "<<position<<", blockNo "<<blockNo<<", ar[0] "<<ar[0]<<endl;
+    //cout << "start Position "<<position<<", blockNo "<<blockNo<<", ar[0] "<<ar[0]<<endl;
     for(int offset = 1; offset <= ar[0] ; offset++){
         //base = pBase + ar[offset];
         type_t key = *(segmentKeyOffset+pbase+ar[offset]);
@@ -909,12 +992,24 @@ type_t PMA::findLocation(type_t key, int targetSegment){
 }
 
 void PMA::printAllElements(){
+    int totalElements = 0;
     for(type_t i = 0; i<totalSegments; i++){
         type_t * key = key_chunks[i];
         for(type_t j = 0; j<=lastElementPos[i]; j++){
             cout << *(key+j)<< " ";
         }
         cout<<"last offset: "<<lastElementPos[i] <<" Total Segment: "<<totalSegments<< endl;
+        totalElements += cardinality[i];
     }
+    cout<< "Total element in structure: "<< totalElements << endl;
 
+}
+
+void PMA::printSegElements(int targetSegment){
+    
+    type_t * key = key_chunks[targetSegment];
+    for(type_t j = 0; j<=lastElementPos[targetSegment]; j++){
+        cout << *(key+j)<< " ";
+    }
+    cout<<"last offset: "<<lastElementPos[targetSegment] <<" Cardinality: "<<cardinality[targetSegment]<<" Total Segment: "<<totalSegments<< endl;
 }

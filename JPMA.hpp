@@ -15,16 +15,20 @@ private:
     vector<int> cardinality;
     int totalSegments = 0;
     u_char NonZeroEntries[JacobsonIndexCount][JacobsonIndexSize+1];
-    //u_short bitmap[MAX_SEGMENTS][BLOCKS_IN_SEGMENT];
     vector<vector<u_short>> bitmap;
     type_t lastValidPos;             //Last accessible slot in each segment
     
 public:
+    enum redistribution{
+        INSERT = 1,
+        DELETE = 2,
+        REDESIGN = 3
+    };
     PMA();
     ~PMA();
 
     //Library functions
-    bool insert(type_t key, type_t value);
+    bool insert(type_t key, type_t value, int insertCount);
     bool remove(type_t key);
     bool lookup(type_t key);
     type_t range_sum(type_t startKey, type_t endKey);
@@ -35,7 +39,7 @@ public:
     bool deleteInPosition(type_t position, int targetSegment, type_t key);
     void deleteSegment(int targetSegment);
     type_t findLocation(type_t key, int targetSegment);
-    void redistribute(int targetSegment);
+    void redistribute(int targetSegment, redistribution type);
     void redistributeWithPrev(int targetSegment);
     void redistributeWithNext(int targetSegment);
     void redistributeWithDividing(int targetSegment);
@@ -43,5 +47,6 @@ public:
 
     //Testing functions
     void printAllElements(void);
+    void printSegElements(int targetSegment);
 };
 #endif
